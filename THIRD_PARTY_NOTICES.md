@@ -1,5 +1,13 @@
 # Third-party notices
 
+## glam (particle quaternion arithmetic)
+
+`crates/horizon-client-render/src/gfx/particle_quad.wgsl` follows the quaternion-vector
+arithmetic order in [glam 0.30.10](https://github.com/bitshifter/glam-rs/tree/990737c58c8c6f4315a4ad09806aa55aa141a503)
+(`src/f32/sse2/quat.rs::mul_vec3a`, `src/sse2.rs::dot3_in_x`), by the glam contributors.
+The code is adapted to WGSL with explicit rounding barriers to match the CPU vertex
+path. glam is MIT OR Apache-2.0; this adaptation uses MIT, whose notice heads the shader.
+
 ## wgpu-hal
 
 `third_party/wgpu-hal` is [wgpu-hal](https://github.com/gfx-rs/wgpu) 30.0.1 by the gfx-rs

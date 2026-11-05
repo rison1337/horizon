@@ -2603,6 +2603,7 @@ struct Game<'a> {
     /// and this frame's draws.
     skin_models: std::cell::RefCell<horizon_client::mobs::skin::SkinModels>,
     skin_frame: std::cell::RefCell<horizon_client::gfx::entity_skin::SkinFrame>,
+    particle_frame: horizon_client::gfx::particle_quad::ParticleFrame,
     /// The glowing entities' silhouettes this frame (game/glowing.rs).
     glowing_vertices: std::cell::RefCell<Vec<Vertex>>,
     /// The shader pack's entity and block entity ids, while one draws entities.
@@ -11727,9 +11728,55 @@ impl Game<'_> {
         laps.lap("eg_objects");
         // Particles (ParticleEngine.extract): camera-facing quads.
         self.mark_stage(out.len(), "PARTICLES");
+        let mut particle_frame = std::mem::take(&mut self.particle_frame);
+        particle_frame.at = out.len();
+        particle_frame.quads.clear();
         let world = &self.world;
         let particle_mode = self.settings.horizon.particle_culling;
-        if particle_mode == horizon_client::graphics::ParticleCullingMode::Off {
+        if !self.particles.is_empty() && self.renderer.as_ref().is_some_and(|r| r.gpu_particles()) {
+            if particle_mode == horizon_client::graphics::ParticleCullingMode::Off {
+                self.particles.render_gpu(
+                    camera,
+                    self.yaw,
+                    self.pitch,
+                    alpha as f32,
+                    0.0,
+                    false,
+                    None,
+                    |_, _| false,
+                    &|b| world.light(b[0], b[1], b[2]),
+                    &mut out,
+                    &mut particle_frame.quads,
+                );
+            } else {
+                let frustum = self.view_frustum;
+                let focal = self.renderer.as_ref().map_or(0.0, |r| {
+                    let tangent = (f64::from(fov_degrees).to_radians() * 0.5).tan();
+                    if tangent.is_finite() && tangent > 0.0 {
+                        (f64::from(r.config.height.max(1)) / (2.0 * tangent)) as f32
+                    } else {
+                        0.0
+                    }
+                });
+                {
+                    let mut culling = self.particle_occlusion_context(camera);
+                    self.particles.render_gpu(
+                        camera,
+                        self.yaw,
+                        self.pitch,
+                        alpha as f32,
+                        focal,
+                        true,
+                        frustum.as_ref(),
+                        &mut |min, max| culling.hidden(min, max),
+                        &|b| world.light(b[0], b[1], b[2]),
+                        &mut out,
+                        &mut particle_frame.quads,
+                    );
+                }
+                self.finish_async_particle_culling();
+            }
+        } else if particle_mode == horizon_client::graphics::ParticleCullingMode::Off {
             self.particles.render(
                 camera,
                 self.yaw,
@@ -11765,6 +11812,7 @@ impl Game<'_> {
             }
             self.finish_async_particle_culling();
         }
+        self.particle_frame = particle_frame;
         laps.lap("eg_particles");
         // Breaking progress overlays (destroy_stage_0..9): ours and the other players'.
         self.mark_stage(out.len(), "DESTROY");
@@ -13098,6 +13146,7 @@ impl Game<'_> {
         self.see_through_vertices.clear();
         self.glowing_vertices.get_mut().clear();
         self.shadow_only_vertices.get_mut().clear();
+        self.particle_frame.quads.clear();
         self.entity_spans.borrow_mut().clear();
         self.entity_motion.borrow_mut().clear();
         self.skin_models
@@ -16403,6 +16452,7 @@ impl Game<'_> {
         self.see_through_vertices.clear();
         self.glowing_vertices.get_mut().clear();
         self.shadow_only_vertices.get_mut().clear();
+        self.particle_frame.quads.clear();
         if !title {
             let (built, static_sections, visible_static_sections, static_stats) =
                 spans::time("entity_geometry", || {
@@ -16588,6 +16638,7 @@ impl Game<'_> {
             entity_motion: &entity_motion,
             entity_spans: &entity_spans,
             skin: skin.pending().then_some(&skin),
+            particles: (!self.particle_frame.quads.is_empty()).then_some(&self.particle_frame),
             glowing: &glowing,
             dynamic_lights: &self.dynamic_lights,
             colored_lights: &colored_lights,
@@ -19478,6 +19529,7 @@ impl<'a> Game<'a> {
             entity_motion: Default::default(),
             skin_models: Default::default(),
             skin_frame: Default::default(),
+            particle_frame: Default::default(),
             glowing_vertices: Default::default(),
             pack_ids: None,
             health_hud: hud_layout::HealthHud::default(),
@@ -21395,6 +21447,7 @@ fn loading_frame(hud: &HudBatch) -> Frame<'_> {
         entity_motion: &[],
         entity_spans: &[],
         skin: None,
+        particles: None,
         glowing: &[],
         dynamic_lights: &[],
         colored_lights: &[],

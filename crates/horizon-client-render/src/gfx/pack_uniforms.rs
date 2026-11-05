@@ -2257,6 +2257,7 @@ mod initial_history_tests {
             shadow_only: &[],
             entity_spans: &[],
             skin: None,
+            particles: None,
             glowing: &[],
             dynamic_lights: &[],
             clouds: None,

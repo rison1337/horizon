@@ -346,6 +346,7 @@ fn frame(hud: &HudBatch) -> Frame<'_> {
         shadow_only: &[],
         entity_spans: &[],
         skin: None,
+        particles: None,
         glowing: &[],
         dynamic_lights: &[],
         clouds: None,

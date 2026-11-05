@@ -168,6 +168,7 @@ mod gpu_culling;
 mod hdr;
 mod hdr_icc;
 mod hdr_stats;
+pub mod particle_quad;
 pub use hdr::Calibration as HdrCalibration;
 pub mod block_light;
 mod displace;
@@ -933,6 +934,7 @@ pub struct Frame<'a> {
     /// Ordinary entity models posed on the GPU (`entity_skin`), drawn before `entities`'
     /// ordinary ones; only when `Renderer::skins_entities` said so.
     pub skin: Option<&'a entity_skin::SkinFrame>,
+    pub particles: Option<&'a particle_quad::ParticleFrame>,
     pub weather: &'a [crate::weather::Vertex],
     pub weather_time: crate::weather::Time,
     /// Horizon Extras' dynamic lights, nearest first (`dynamic_light::select`); empty when off.
@@ -1211,6 +1213,7 @@ pub struct Renderer {
     entity_batch: EntityBatch,
     /// Ordinary entity models posed on the GPU; `None` without compute shaders.
     entity_skin: Option<entity_skin::EntitySkin>,
+    particle_gpu: Option<particle_quad::ParticleGpu>,
     group: wgpu::BindGroup,
     globals: wgpu::Buffer,
     /// Resource-pack normal/specular maps, split like the colour sprite arrays.
@@ -4283,6 +4286,7 @@ impl Renderer {
             usage: entity_skin::EntitySkin::usage(entity_skin.is_some()),
             mapped_at_creation: false,
         });
+        let particle_gpu = particle_quad::ParticleGpu::new(&device, entity_skin.is_some());
         let static_entity_index_quads = 1 << 14;
         let static_entity_indices = Self::quad_indices(&device, static_entity_index_quads);
         let flat_wanted = flat::wanted(&adapter, &device);
@@ -4621,6 +4625,7 @@ impl Renderer {
             static_entity_index_quads,
             entity_batch: EntityBatch::default(),
             entity_skin,
+            particle_gpu,
             group,
             globals,
             pbr_maps,
@@ -6334,6 +6339,15 @@ impl Renderer {
                     && !native_render::render_needs().entity_spans
             })
             && self.native.is_none()
+    }
+
+    /// Compact particles currently support the standard renderer only.
+    pub fn gpu_particles(&self) -> bool {
+        self.particle_gpu.is_some()
+            && !self.frame_gen.on
+            && self.pack_post.is_none()
+            && self.native.is_none()
+            && !native_render::render_needs().entity_spans
     }
 
     /// Whether the layers tagged `OIT_ENTITY` (the eyes render type's, horse
@@ -8373,12 +8387,13 @@ impl Renderer {
             oit_entity_quads,
             world_text_quads,
             world_text_offset_quads,
-        ] = self.entity_batch.update(
+        ] = self.entity_batch.update_particles(
             entities,
             frame.additive,
             frame.hand,
             frame.see_through,
             oit_on,
+            frame.particles,
         );
         self.entity_batch.append_shadow_only(frame.shadow_only);
         // The posed models' vertices come first: the ordinary entities' draw takes them in.
@@ -8446,7 +8461,7 @@ impl Renderer {
             camera,
         );
         // Frame generation's made frame draws its own hand, halfway, after the others.
-        let made_hand_vertex = (posed as usize + self.entity_batch.combined.len()) as i32;
+        let made_hand_vertex = (posed as usize + self.entity_batch.virtual_vertices()) as i32;
         if fg {
             self.frame_gen
                 .halfway_hand(frame.hand, hand_view, &mut self.entity_batch.combined);
@@ -8465,7 +8480,7 @@ impl Renderer {
         let shadow_only_quads = (frame.shadow_only.len() / 4) as u32;
         // Glowing entities' silhouettes posed on the GPU go last, past every
         // material (the outline pass draws them from there).
-        let outline_base = posed + all_entities.len() as u32;
+        let outline_base = posed + self.entity_batch.virtual_vertices() as u32;
         let outlined = skin.map_or(0, |s| s.outline_vertices);
         let entity_vertices = u64::from(outline_base) + u64::from(outlined);
         if entity_vertices > self.entity_capacity {
@@ -8478,11 +8493,35 @@ impl Renderer {
             });
         }
         if !all_entities.is_empty() {
-            self.uploads.buffer(
+            let mut start = 0;
+            let mut dst = u64::from(posed);
+            for &(end, gap) in self
+                .entity_batch
+                .gaps
+                .iter()
+                .chain(std::iter::once(&(all_entities.len(), 0)))
+            {
+                if end > start {
+                    self.uploads.buffer(
+                        &mut encoder,
+                        &self.entity_buffer,
+                        dst * 44,
+                        bytemuck::cast_slice(&all_entities[start..end]),
+                    );
+                }
+                dst += (end - start) as u64 + u64::from(gap);
+                start = end;
+            }
+        }
+        if let (Some(gpu), Some(particles)) = (&mut self.particle_gpu, frame.particles) {
+            gpu.dispatch(
+                &self.device,
+                &mut self.uploads,
                 &mut encoder,
+                particles,
+                &self.entity_batch.particle_destinations,
+                posed,
                 &self.entity_buffer,
-                u64::from(posed) * std::mem::size_of::<Vertex>() as u64,
-                bytemuck::cast_slice(all_entities),
             );
         }
         if let (Some(skinner), Some(skin)) = (&mut self.entity_skin, skin) {

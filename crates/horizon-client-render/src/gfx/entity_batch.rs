@@ -85,6 +85,9 @@ pub(super) struct EntityBatch {
     // frame, keeping their storage.
     runs: [Vec<(usize, usize)>; MATERIALS],
     pub(super) combined: Vec<Vertex>,
+    /// CPU vertex offsets and GPU-only vertex counts inserted there.
+    pub(super) gaps: Vec<(usize, u32)>,
+    pub(super) particle_destinations: Vec<u32>,
     /// Additive quads tagged `OIT_ENTITY` that the last `update` moved into the
     /// last material (improved transparency on): the dragon's eyes, which share
     /// the additive buffer with its rays.
@@ -97,6 +100,7 @@ impl EntityBatch {
         self.combined.extend_from_slice(shadow_only);
     }
 
+    #[cfg(test)]
     pub(super) fn update(
         &mut self,
         entities: &[Vertex],
@@ -104,6 +108,27 @@ impl EntityBatch {
         hand: &[Vertex],
         see_through: &[Vertex],
         oit: bool,
+    ) -> [u32; MATERIALS] {
+        self.update_particles(entities, additive, hand, see_through, oit, None)
+    }
+
+    pub(super) fn virtual_vertices(&self) -> usize {
+        self.combined.len()
+            + self
+                .gaps
+                .iter()
+                .map(|(_, count)| *count as usize)
+                .sum::<usize>()
+    }
+
+    pub(super) fn update_particles(
+        &mut self,
+        entities: &[Vertex],
+        additive: &[Vertex],
+        hand: &[Vertex],
+        see_through: &[Vertex],
+        oit: bool,
+        particles: Option<&super::particle_quad::ParticleFrame>,
     ) -> [u32; MATERIALS] {
         let quads = entities.as_chunks::<4>().0;
         for runs in &mut self.runs {
@@ -123,12 +148,47 @@ impl EntityBatch {
         }
         let entity_vertices = quads.len() * 4;
         self.combined.clear();
+        self.gaps.clear();
+        self.particle_destinations.clear();
+        self.particle_destinations
+            .resize(particles.map_or(0, |p| p.quads.len()), 0);
         self.combined
             .reserve(entity_vertices + additive.len() + hand.len() + see_through.len());
-        for runs in &self.runs[..10] {
+        for (kind, runs) in self.runs[..10].iter().enumerate() {
+            let mut inserted = false;
+            let mut insert = |combined: &mut Vec<Vertex>, gaps: &mut Vec<(usize, u32)>| {
+                if kind != 0 && kind != 7 {
+                    return;
+                }
+                if let Some(particles) = particles {
+                    let start = combined.len() as u32 + gaps.iter().map(|(_, n)| n).sum::<u32>();
+                    let mut count = 0u32;
+                    for (i, quad) in particles.quads.iter().enumerate() {
+                        if material(quad.layer, oit) == kind {
+                            self.particle_destinations[i] = start + count * 4;
+                            count += 1;
+                        }
+                    }
+                    if count != 0 {
+                        gaps.push((combined.len(), count * 4));
+                    }
+                    counts[kind] += count as usize;
+                }
+            };
             for &(first, count) in runs {
-                self.combined
-                    .extend_from_slice(&entities[first * 4..(first + count) * 4]);
+                let (start, end) = (first * 4, (first + count) * 4);
+                if !inserted && particles.is_some_and(|p| p.at <= end) {
+                    let at = particles.expect("checked").at.clamp(start, end);
+                    self.combined.extend_from_slice(&entities[start..at]);
+                    insert(&mut self.combined, &mut self.gaps);
+                    inserted = true;
+                    self.combined.extend_from_slice(&entities[at..end]);
+                } else {
+                    self.combined.extend_from_slice(&entities[start..end]);
+                }
+            }
+            if !inserted {
+                insert(&mut self.combined, &mut self.gaps);
             }
         }
         // `RenderTypes.eyes` is blended like the other entities, not added: with
@@ -185,9 +245,14 @@ impl EntityBatch {
 }
 
 #[cfg(test)]
+#[path = "entity_batch/tests/particles.rs"]
+mod particle_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::{hint::black_box, time::Instant};
+
     #[test]
     fn world_canvas_sorts_after_oit_eyes_before_frame_tails() {
         let quad = |layer, x| {

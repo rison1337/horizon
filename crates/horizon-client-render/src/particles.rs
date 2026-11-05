@@ -4642,6 +4642,7 @@ impl ParticleEngine {
             &mut |_, _| false,
             light_at,
             out,
+            None,
         );
     }
 
@@ -4674,7 +4675,53 @@ impl ParticleEngine {
             &mut occluded,
             light_at,
             out,
+            None,
         );
+    }
+
+    /// The same extraction and visibility decisions, with compact GPU quads.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_gpu(
+        &self,
+        camera: DVec3,
+        yaw: f32,
+        pitch: f32,
+        partial: f32,
+        pixel_focal_length: f32,
+        culling_enabled: bool,
+        frustum: Option<&crate::gfx::Frustum>,
+        mut occluded: impl FnMut([f64; 3], [f64; 3]) -> bool,
+        light_at: &dyn Fn([i32; 3]) -> u8,
+        out: &mut Vec<Vertex>,
+        quads: &mut Vec<crate::gfx::particle_quad::ParticleQuad>,
+    ) {
+        if culling_enabled {
+            self.render_inner::<true>(
+                camera,
+                yaw,
+                pitch,
+                partial,
+                pixel_focal_length,
+                frustum,
+                &mut occluded,
+                light_at,
+                out,
+                Some(quads),
+            );
+        } else {
+            self.render_inner::<false>(
+                camera,
+                yaw,
+                pitch,
+                partial,
+                0.0,
+                None,
+                &mut occluded,
+                light_at,
+                out,
+                Some(quads),
+            );
+        }
     }
 
     fn render_inner<const CULL: bool>(
@@ -4688,6 +4735,7 @@ impl ParticleEngine {
         occluded: &mut dyn FnMut([f64; 3], [f64; 3]) -> bool,
         light_at: &dyn Fn([i32; 3]) -> u8,
         out: &mut Vec<Vertex>,
+        mut quads: Option<&mut Vec<crate::gfx::particle_quad::ParticleQuad>>,
     ) {
         // Camera.setRotation: rotationYXZ(PI - yRot, -xRot, 0).
         let base = Quat::from_rotation_y(std::f32::consts::PI - yaw.to_radians())
@@ -4847,6 +4895,22 @@ impl ParticleEngine {
                 r.v0 + dv * p.uv[3],
             );
             for rotation in rotations.into_iter().flatten() {
+                if let Some(quads) = quads.as_deref_mut() {
+                    quads.push(crate::gfx::particle_quad::ParticleQuad {
+                        center_size: [center.x, center.y, center.z, size],
+                        rotation: rotation.to_array(),
+                        rect: [u0, v0, u1, v1],
+                        color,
+                        light,
+                        layer: if layer {
+                            crate::gfx::TRANSLUCENT_PARTICLE_OVERLAY
+                        } else {
+                            0
+                        } | u32::from(hdr_tier(p.ty)) << 16,
+                        dst: 0,
+                    });
+                    continue;
+                }
                 for (n, uv) in [
                     ((1.0, -1.0), [u1, v1]),
                     ((1.0, 1.0), [u1, v0]),
@@ -4936,6 +5000,10 @@ const CREEPER: [[f64; 2]; 12] = [
     [0.2, -0.4],
     [0.0, -0.4],
 ];
+
+#[cfg(test)]
+#[path = "particles/tests/gpu.rs"]
+mod gpu_tests;
 
 #[cfg(test)]
 mod tests {
